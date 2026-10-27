@@ -1,0 +1,79 @@
+diff --git a/src/managers/screenshare/ScreenshareFrame.cpp b/src/managers/screenshare/ScreenshareFrame.cpp
+index 67e3381c..2df44d4e 100644
+--- a/src/managers/screenshare/ScreenshareFrame.cpp
++++ b/src/managers/screenshare/ScreenshareFrame.cpp
+@@ -202,6 +202,41 @@ void CScreenshareFrame::renderMonitor(Render::CRenderContext& ctx) {
+
+     const auto PMONITOR = m_session->monitor();
+
++    // ── See-through capture ──────────────────────────────────────────────────
++    // If any window on this monitor is flagged noscreenshare, the default path below
++    // copies the composited scanout (which already has that window baked in) and paints
++    // a black box over it. Instead, re-render the monitor's scene with those windows
++    // skipped, so the surfaces behind them show through — no black box.
++    {
++        bool hasHidden = false;
++        for (auto const& w : Desktop::windowState()->windows()) {
++            if (w->m_ruleApplicator && w->m_ruleApplicator->noScreenShare().valueOrDefault() && g_pHyprRenderer->shouldRenderWindow(w, PMONITOR)) {
++                hasHidden = true;
++                break;
++            }
++        }
++
++        if (hasHidden) {
++            ctx.m_data.fbSize          = m_bufferSize;
++            g_pHyprRenderer->setProjectionType(ctx, Render::RPT_EXPORT);
++            ctx.m_data.transformDamage = false;
++            ctx.m_data.noSimplify      = true;
++            g_pHyprRenderer->setViewport(0, 0, m_bufferSize.x, m_bufferSize.y);
++            g_pHyprRenderer->startRenderPass(ctx);
++            ctx.m_bExcludeNoScreenShare = true;
++            if (PMONITOR->m_activeWorkspace)
++                g_pHyprRenderer->renderWorkspace(ctx, PMONITOR, PMONITOR->m_activeWorkspace, Time::steadyNow(), CBox{{}, PMONITOR->m_pixelSize});
++            ctx.m_bExcludeNoScreenShare = false;
++
++            if (m_overlayCursor) {
++                CRegion  fakeDamage = {0, 0, INT16_MAX, INT16_MAX};
++                Vector2D cursorPos  = Pointer::mgr()->untransformedPosition() - PMONITOR->m_position - m_session->m_captureBox.pos() / PMONITOR->m_scale;
++                Pointer::mgr()->renderSoftwareCursorsFor(ctx, PMONITOR, Time::steadyNow(), fakeDamage, cursorPos, true);
++            }
++            return;
++        }
++    }
++
+     auto       TEXTURE = ctx.m_data.pMonitor->resources()->getMirrorTexture();
+     if (!TEXTURE) {
+         LOG(Log::ERR, "Invalid source texture");
+diff --git a/src/render/Context.cpp b/src/render/Context.cpp
+index abac0fe8..20f10dda 100644
+--- a/src/render/Context.cpp
++++ b/src/render/Context.cpp
+@@ -35,6 +35,8 @@ bool CRenderContext::readOnlyEffects() const {
+ }
+
+ bool CRenderContext::shouldRenderContent(bool noScreenShare) const {
++    if (m_bExcludeNoScreenShare && noScreenShare)
++        return false;
+     return !m_renderingCapture || !noScreenShare;
+ }
+
+@@ -84,6 +86,7 @@ void CRenderContext::reset() {
+     m_blockSurfaceFeedback = false;
+     m_renderingSnapshot    = false;
+     m_renderingCapture     = false;
++    m_bExcludeNoScreenShare = false;
+     m_swapchainAcquired    = false;
+     m_gl                   = {};
+     m_active               = false;
+diff --git a/src/render/Context.hpp b/src/render/Context.hpp
+index 430f2381..f9adf155 100644
+--- a/src/render/Context.hpp
++++ b/src/render/Context.hpp
+@@ -79,6 +79,7 @@ namespace Render {
+         bool                               m_blockSurfaceFeedback = false;
+         bool                               m_renderingSnapshot    = false;
+         bool                               m_renderingCapture     = false;
++        bool                               m_bExcludeNoScreenShare = false; // see-through capture: skip noscreenshare windows in the capture render pass
+         bool                               m_swapchainAcquired    = false;
+
+         struct {
